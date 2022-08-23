@@ -5,6 +5,7 @@ import TOML from "@iarna/toml";
 import { findUp } from "find-up";
 import { version as wranglerVersion } from "../package.json";
 
+import { fetchResult } from "./cfetch";
 import { fetchDashboardScript } from "./cfetch/internal";
 import { readConfig } from "./config";
 import { confirm, select } from "./dialogs";
@@ -55,6 +56,69 @@ interface InitArgs {
 	site?: boolean;
 	yes?: boolean;
 }
+// TODO Move into types file?
+export type ServiceMetaDataRes = {
+	id: string;
+	default_environment: {
+		environment: string;
+		created_on: Date;
+		modified_on: Date;
+		script: {
+			id: string;
+			tag: string;
+			etag: string;
+			handlers: string[];
+			modified_on: Date;
+			created_on: Date;
+			migration_tag: string;
+			usage_model: "bundled" | "unbound";
+			compatibility_date: Date;
+		};
+	};
+	created_on: Date;
+	modified_on: Date;
+	usage_model: "bundled" | "unbound";
+	environments: [
+		{
+			environment: string;
+			created_on: Date;
+			modified_on: Date;
+		}
+	];
+};
+
+export type BindingsTypes =
+	| "plain_text"
+	| "secret_text"
+	| "r2_bucket"
+	| "kv_namespace"
+	| "durable_object_namespace"
+	| "service";
+
+export type BindingsRes = {
+	name: string;
+	text: string;
+	type: BindingsTypes;
+	namespace_id?: string;
+	class_name?: string;
+	environment?: string;
+	service?: string;
+}[];
+
+export type RoutesRes = {
+	id: string;
+	pattern: string;
+}[];
+
+export type CronTriggersRes = {
+	schedules: [
+		{
+			cron: string;
+			created_on: Date;
+			modified_on: Date;
+		}
+	];
+};
 
 export async function initHandler(args: ArgumentsCamelCase<InitArgs>) {
 	await printWranglerBanner();
@@ -462,9 +526,14 @@ export async function initHandler(args: ArgumentsCamelCase<InitArgs>) {
 				await mkdir(path.join(creationDirectory, "./src"), {
 					recursive: true,
 				});
-
+				const serviceMetaData = await fetchResult<ServiceMetaDataRes>(
+					`/accounts/${accountId}/workers/services/${fromDashScriptName}`
+				);
+				const defaultEnvironment =
+					serviceMetaData["default_environment"]["environment"];
+				// I want the default environment, assuming it's the most up to date code.
 				const dashScript = await fetchDashboardScript(
-					`/accounts/${accountId}/workers/scripts/${fromDashScriptName}`,
+					`/accounts/${accountId}/workers/services/${fromDashScriptName}/environments/${defaultEnvironment}/content`,
 					{
 						method: "GET",
 					}
@@ -480,7 +549,11 @@ export async function initHandler(args: ArgumentsCamelCase<InitArgs>) {
 					justCreatedWranglerToml,
 					pathToPackageJson,
 					"src/index.ts",
-					{}
+					//? Should we have Environment argument for `wrangler init --from-dash` - Jacob
+					await getWorkerConfig(accountId, fromDashScriptName, {
+						defaultEnvironment,
+						environments: serviceMetaData.environments,
+					})
 				);
 			} else {
 				const newWorkerType = yesFlag
@@ -529,8 +602,15 @@ export async function initHandler(args: ArgumentsCamelCase<InitArgs>) {
 					recursive: true,
 				});
 
+				const serviceMetaData = await fetchResult<ServiceMetaDataRes>(
+					`/accounts/${accountId}/workers/services/${fromDashScriptName}`
+				);
+				const defaultEnvironment =
+					serviceMetaData["default_environment"]["environment"];
+
+				// I want the default environment, assuming it's the most up to date code.
 				const dashScript = await fetchDashboardScript(
-					`/accounts/${accountId}/workers/scripts/${fromDashScriptName}`,
+					`/accounts/${accountId}/workers/services/${fromDashScriptName}/environments/${defaultEnvironment}/content`,
 					{
 						method: "GET",
 					}
@@ -546,7 +626,11 @@ export async function initHandler(args: ArgumentsCamelCase<InitArgs>) {
 					justCreatedWranglerToml,
 					pathToPackageJson,
 					"src/index.ts",
-					{}
+					//? Should we have Environment argument for `wrangler init --from-dash` - Jacob
+					await getWorkerConfig(accountId, fromDashScriptName, {
+						defaultEnvironment,
+						environments: serviceMetaData.environments,
+					})
 				);
 			} else {
 				const newWorkerType = yesFlag
@@ -619,4 +703,97 @@ async function findPath(
 			cwd: cwd,
 		});
 	}
+}
+
+async function getWorkerConfig(
+	accountId: string,
+	fromDashScriptName: string,
+	{
+		defaultEnvironment,
+		environments,
+	}: {
+		defaultEnvironment: string;
+		environments: ServiceMetaDataRes["environments"];
+	}
+) {
+	// use Promise.all to fetch in parallel
+	const [bindings, routes, serviceEnvMetadata, cronTriggers] =
+		await Promise.all([
+			fetchResult<BindingsRes>(
+				`/accounts/${accountId}/workers/services/${fromDashScriptName}/environments/${defaultEnvironment}/bindings`
+			),
+			fetchResult<RoutesRes>(
+				`/accounts/${accountId}/workers/services/${fromDashScriptName}/environments/${defaultEnvironment}/routes`
+			),
+			fetchResult<ServiceMetaDataRes["default_environment"]>(
+				`/accounts/${accountId}/workers/services/${fromDashScriptName}/environments/${defaultEnvironment}`
+			),
+			fetchResult<CronTriggersRes>(
+				`/accounts/${accountId}/workers/scripts/${fromDashScriptName}/schedules`
+			),
+		]).catch((e) => {
+			logger.error(e);
+			throw new Error(
+				"Unable to fetch bindings, routes, or services metadata from the dashboard. Please try again later."
+			);
+		});
+
+	const mappedBindings = bindings
+		.filter((binding) => binding.type !== "secret_text")
+		// Combine the same types into {[type]: [binding]}
+		.reduce((configObj, binding) => {
+			const { type, ...noTypeBinding } = binding;
+
+			// Some types have a different names in wrangler.toml
+			switch (type) {
+				case "plain_text":
+					{
+						configObj["vars"] = { ...(configObj?.var ?? {}), ...noTypeBinding };
+					}
+					break;
+				case "durable_object_namespace":
+					{
+						configObj["durable_objects"] = {
+							bindings: [
+								...(configObj.durable_objects?.bindings ?? []),
+								noTypeBinding,
+							],
+						};
+					}
+					break;
+				// Add the 1:1 named type to the configObj with value of the binding
+				default: {
+					configObj[type] = configObj[type] ?? [];
+					configObj[type].push(noTypeBinding);
+				}
+			}
+
+			return configObj;
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		}, {} as Record<string, any>);
+
+	const durableObjectClassNames = bindings
+		.filter((binding) => binding.type === "durable_object_namespace")
+		.map((durableObject) => durableObject.class_name ?? "");
+
+	return {
+		compatibility_date: serviceEnvMetadata.script.compatibility_date,
+		routes,
+		usage_model: serviceEnvMetadata.script.usage_model,
+		migrations: {
+			tag: serviceEnvMetadata.script.migration_tag,
+			new_classes: durableObjectClassNames,
+		},
+		triggers: {
+			cron: cronTriggers.schedules.map((scheduled) => scheduled.cron),
+		},
+		env: environments
+			.filter((env) => env.environment !== "production")
+			// Env can have multiple Enviroments, with different configs.
+			.reduce((envObj, { environment }) => {
+				return { ...envObj, [environment]: {} };
+				// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			}, {} as Record<string, any>),
+		...mappedBindings,
+	};
 }

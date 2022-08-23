@@ -6,7 +6,12 @@ import { parseConfigFileTextToJson } from "typescript";
 import { version as wranglerVersion } from "../../package.json";
 import { getPackageManager } from "../package-manager";
 import { mockAccountId, mockApiToken } from "./helpers/mock-account-id";
-import { setMockFetchDashScript, unsetAllMocks } from "./helpers/mock-cfetch";
+import {
+	setMockFetchDashScript,
+	setMockResponse,
+	unsetAllMocks,
+	unsetSpecialMockFns,
+} from "./helpers/mock-cfetch";
 import { mockConsoleMethods } from "./helpers/mock-console";
 import {
 	mockConfirm,
@@ -1908,6 +1913,7 @@ describe("init", () => {
 		mockAccountId({ accountId: "LCARS" });
 		afterEach(() => {
 			unsetAllMocks();
+			unsetSpecialMockFns();
 		});
 		const mockDashboardScript = `
 		export default {
@@ -1916,12 +1922,222 @@ describe("init", () => {
 			},
 		};
 		`;
+		const mockServiceMetadata = {
+			id: "memory-crystal",
+			default_environment: {
+				environment: "test",
+				created_on: "1987-9-27",
+				modified_on: "1987-9-27",
+				script: {
+					id: "memory-crystal",
+					tag: "test-tag",
+					etag: "some-etag",
+					handlers: [],
+					modified_on: "1987-9-27",
+					created_on: "1987-9-27",
+					migration_tag: "some-migration-tag",
+					usage_model: "bundled",
+					compatibility_date: "1987-9-27",
+				},
+			},
+			created_on: "1987-9-27",
+			modified_on: "1987-9-27",
+			usage_model: "bundled",
+			environments: [
+				{
+					environment: "test",
+					created_on: "1987-9-27",
+					modified_on: "1987-9-27",
+				},
+				{
+					environment: "staging",
+					created_on: "1987-9-27",
+					modified_on: "1987-9-27",
+				},
+			],
+		};
+		const mockBindingsRes = [
+			{
+				name: "ABC",
+				type: "secret_text",
+			},
+			{
+				name: "ANOTHER",
+				text: "thing",
+				type: "plain_text",
+			},
+			{
+				class_name: "Durability",
+				name: "DURABLE_TEST",
+				namespace_id: "some-namespace-id",
+				type: "durable_object_namespace",
+			},
+			{
+				name: "kv_testing",
+				namespace_id: "some-namespace-id",
+				type: "kv_namespace",
+			},
+			{
+				bucket_name: "test-bucket",
+				name: "test-bucket",
+				type: "r2_bucket",
+			},
+			{
+				environment: "production",
+				name: "website",
+				service: "website",
+				type: "service",
+			},
+		];
+		const mockRoutesRes = [
+			{
+				id: "some-route-id",
+				pattern: "delta.quadrant",
+			},
+			{
+				id: "some-route-id",
+				pattern: "alpha.quadrant",
+			},
+		];
+		const mockConfigExpected = {
+			main: "src/index.ts",
+			compatibility_date: "1987-9-27",
+			name: "isolinear-optical-chip",
+			durable_objects: {
+				bindings: [
+					{
+						class_name: "Durability",
+						name: "DURABLE_TEST",
+						namespace_id: "some-namespace-id",
+					},
+				],
+			},
+			kv_namespace: [
+				{
+					name: "kv_testing",
+					namespace_id: "some-namespace-id",
+				},
+			],
+			migrations: {
+				new_classes: ["Durability"],
+				tag: "some-migration-tag",
+			},
+			r2_bucket: [
+				{
+					bucket_name: "test-bucket",
+					name: "test-bucket",
+				},
+			],
+			routes: [
+				{
+					id: "some-route-id",
+					pattern: "delta.quadrant",
+				},
+				{
+					id: "some-route-id",
+					pattern: "alpha.quadrant",
+				},
+			],
+			service: [
+				{
+					environment: "production",
+					name: "website",
+					service: "website",
+				},
+			],
+			triggers: {
+				cron: ["0 0 0 * * *"],
+			},
+			usage_model: "bundled",
+			vars: {
+				name: "ANOTHER",
+				text: "thing",
+			},
+			env: {
+				test: {},
+				staging: {},
+			},
+		};
+
+		function mockSupportingDashRequests({
+			expectedAccountId = "",
+			expectedScriptName = "",
+			expectedEnvironment = "",
+		}) {
+			setMockResponse(
+				`/accounts/:accountId/workers/services/:scriptName`,
+				"GET",
+				([_url, accountId, scriptName]) => {
+					expect(accountId).toEqual(expectedAccountId);
+					expect(scriptName).toEqual(expectedScriptName);
+
+					return mockServiceMetadata;
+				}
+			);
+			setMockResponse(
+				`/accounts/:accountId/workers/services/:scriptName/environments/:environment/bindings`,
+				"GET",
+				([_url, accountId, scriptName, environment]) => {
+					expect(accountId).toEqual(expectedAccountId);
+					expect(scriptName).toEqual(expectedScriptName);
+					expect(environment).toEqual(expectedEnvironment);
+
+					return mockBindingsRes;
+				}
+			);
+			setMockResponse(
+				`/accounts/:accountId/workers/services/:scriptName/environments/:environment/routes`,
+				"GET",
+				([_url, accountId, scriptName, environment]) => {
+					expect(accountId).toEqual(expectedAccountId);
+					expect(scriptName).toEqual(expectedScriptName);
+					expect(environment).toEqual(expectedEnvironment);
+
+					return mockRoutesRes;
+				}
+			);
+			setMockResponse(
+				`/accounts/:accountId/workers/services/:scriptName/environments/:environment`,
+				"GET",
+				([_url, accountId, scriptName, environment]) => {
+					expect(accountId).toEqual(expectedAccountId);
+					expect(scriptName).toEqual(expectedScriptName);
+					expect(environment).toEqual(expectedEnvironment);
+
+					return mockServiceMetadata.default_environment;
+				}
+			);
+			setMockResponse(
+				`/accounts/:accountId/workers/scripts/:scriptName/schedules`,
+				"GET",
+				([_url, accountId, scriptName]) => {
+					expect(accountId).toEqual(expectedAccountId);
+					expect(scriptName).toEqual(expectedScriptName);
+
+					return {
+						schedules: [
+							{
+								cron: "0 0 0 * * *",
+								created_on: new Date(1987, 9, 27),
+								modified_on: new Date(1987, 9, 27),
+							},
+						],
+					};
+				}
+			);
+		}
 
 		//TODO: Tests for a case when a worker name doesn't exist - JACOB & CASS
 		it("should download source script from dashboard w/ positional <name> in TypeScript project", async () => {
+			mockSupportingDashRequests({
+				expectedAccountId: "LCARS",
+				expectedScriptName: "memory-crystal",
+				expectedEnvironment: "test",
+			});
 			setMockFetchDashScript({
 				accountId: "LCARS",
 				fromDashScriptName: "memory-crystal",
+				environment: mockServiceMetadata.default_environment.environment,
 				mockResponse: mockDashboardScript,
 			});
 			mockConfirm(
@@ -1960,17 +2176,22 @@ describe("init", () => {
 					},
 					"isolinear-optical-chip/tsconfig.json": true,
 					"isolinear-optical-chip/wrangler.toml": wranglerToml({
-						...MINIMAL_WRANGLER_TOML,
-						name: "isolinear-optical-chip",
+						...mockConfigExpected,
 					}),
 				},
 			});
 		});
 
 		it("should download source script from dashboard w/ out positional <name>", async () => {
+			mockSupportingDashRequests({
+				expectedAccountId: "LCARS",
+				expectedScriptName: "isolinear-optical-chip",
+				expectedEnvironment: "test",
+			});
 			setMockFetchDashScript({
 				accountId: "LCARS",
 				fromDashScriptName: "isolinear-optical-chip",
+				environment: mockServiceMetadata.default_environment.environment,
 				mockResponse: mockDashboardScript,
 			});
 			mockConfirm(
@@ -2007,7 +2228,7 @@ describe("init", () => {
 					},
 					"isolinear-optical-chip/tsconfig.json": true,
 					"isolinear-optical-chip/wrangler.toml": wranglerToml({
-						...MINIMAL_WRANGLER_TOML,
+						...mockConfigExpected,
 						name: "isolinear-optical-chip",
 					}),
 				},
@@ -2015,9 +2236,15 @@ describe("init", () => {
 		});
 
 		it("should download source script from dashboard as plain JavaScript", async () => {
+			mockSupportingDashRequests({
+				expectedAccountId: "LCARS",
+				expectedScriptName: "isolinear-optical-chip",
+				expectedEnvironment: "test",
+			});
 			setMockFetchDashScript({
 				accountId: "LCARS",
 				fromDashScriptName: "isolinear-optical-chip",
+				environment: mockServiceMetadata.default_environment.environment,
 				mockResponse: mockDashboardScript,
 			});
 			mockConfirm(
@@ -2054,7 +2281,7 @@ describe("init", () => {
 					},
 					"isolinear-optical-chip/tsconfig.json": false,
 					"isolinear-optical-chip/wrangler.toml": wranglerToml({
-						...MINIMAL_WRANGLER_TOML,
+						...mockConfigExpected,
 						name: "isolinear-optical-chip",
 					}),
 				},
