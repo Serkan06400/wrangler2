@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, PathOrFileDescriptor, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { cwd } from "node:process";
@@ -15,7 +15,7 @@ import { logger } from "../logger";
 import * as metrics from "../metrics";
 import { requireAuth } from "../user";
 import { buildFunctions } from "./build";
-import { PAGES_CONFIG_CACHE_FILENAME } from "./constants";
+import { PAGES_CONFIG_CACHE_FILENAME, ROUTES_SPEC_VERSION } from "./constants";
 import { FunctionsNoRoutesError, getFunctionsNoRoutesWarning } from "./errors";
 import {
 	isRoutesJSONSpec,
@@ -254,18 +254,22 @@ export const Handler = async ({
 
 	let builtFunctions: string | undefined = undefined;
 	const functionsDirectory = join(cwd(), "functions");
-	const routesOutputPath = join(tmpdir(), `_routes-${Math.random()}.json`);
+	const routesOutputPath = !existsSync(join(directory, "_routes.json"))
+	? join(tmpdir(), `_routes-${Math.random()}.json`)
+	: undefined;
+
 	if (existsSync(functionsDirectory)) {
 		const outfile = join(tmpdir(), `./functionsWorker-${Math.random()}.js`);
-		try {
-			await buildFunctions({
-				outfile,
-				functionsDirectory,
-				onEnd: () => {},
-				buildOutputDirectory: dirname(outfile),
-				routesOutputPath,
-			});
-			builtFunctions = readFileSync(outfile, "utf-8");
+			try {
+				await buildFunctions({
+					outfile,
+					functionsDirectory,
+					onEnd: () => {},
+					buildOutputDirectory: dirname(outfile),
+					routesOutputPath,
+				});
+
+				builtFunctions = readFileSync(outfile, "utf-8");
 		} catch (e) {
 			if (e instanceof FunctionsNoRoutesError) {
 				logger.warn(
@@ -313,6 +317,12 @@ export const Handler = async ({
 	} catch {}
 
 	try {
+		// Developers can specify a custom _routes.json file, for projects with Pages
+		// Functions or projects in Advanced Mode
+		_routes = readFileSync(join(directory, "_routes.json"), "utf-8");
+	} catch {}
+
+	try {
 		_workerJS = readFileSync(join(directory, "_worker.js"), "utf-8");
 	} catch {}
 
@@ -327,47 +337,68 @@ export const Handler = async ({
 	}
 
 	if (builtFunctions) {
+		// with Pages Functions
+		// https://developers.cloudflare.com/pages/platform/functions/
 		formData.append("_worker.js", new File([builtFunctions], "_worker.js"));
 		logger.log(`✨ Uploading Functions`);
-		try {
-			_routes = readFileSync(routesOutputPath, "utf-8");
-			if (_routes) {
+
+		if (_routes) {
+			// with custom _routes.json file
+			try {
+				_routes = validateAndOptimizeRoutesFile(
+					_routes,
+					join(directory, "_routes.json")
+				);
+
 				formData.append("_routes.json", new File([_routes], "_routes.json"));
+				logger.log(`✨ Uploading _routes.json`);
+
+				logger.warn(
+					`_routes.json is an experimental feature and is subject to change. Please use with care.`
+				);
+			} catch (err) {
+				// forward the potential FatalError from an invalid spec
+				if (err instanceof FatalError) {
+					throw err;
+				}
 			}
-		} catch {}
+		} else {
+			// with generated _routes.json file
+			try {
+				_routes = readFileSync(
+					routesOutputPath as PathOrFileDescriptor,
+					"utf-8"
+				);
+				if (_routes) {
+					formData.append("_routes.json", new File([_routes], "_routes.json"));
+				}
+			} catch {}
+		}
 	} else if (_workerJS) {
 		// Advanced Mode
 		// https://developers.cloudflare.com/pages/platform/functions/#advanced-mode
 		formData.append("_worker.js", new File([_workerJS], "_worker.js"));
 		logger.log(`✨ Uploading _worker.js`);
 
-		try {
-			// In advanced mode, developers can specify a custom _routes.json
-			// file. In which case, we need to run it through optimization
-			// to potentially reduce the overall worker pipeline size
-			const routesPath = join(directory, "_routes.json");
-			const advancedModeRoutesString = readFileSync(routesPath, "utf-8");
-			const advancedModeRoutes = JSON.parse(advancedModeRoutesString);
-
-			if (!isRoutesJSONSpec(advancedModeRoutes)) {
-				throw new FatalError(
-					"Invalid _routes.json file found at:" + routesPath,
-					1
+		if (_routes) {
+			// with custom _routes.json file
+			try {
+				_routes = validateAndOptimizeRoutesFile(
+					_routes,
+					join(directory, "_routes.json")
 				);
-			}
 
-			_routes = JSON.stringify(optimizeRoutesJSONSpec(advancedModeRoutes));
-			formData.append("_routes.json", new File([_routes], "_routes.json"));
-			logger.log(`✨ Uploading _routes.json`);
+				formData.append("_routes.json", new File([_routes], "_routes.json"));
+				logger.log(`✨ Uploading _routes.json`);
 
-			logger.warn(
-				`🚨 _routes.json is an experimental feature and is subject to change. Don't use unless you really must!`
-			);
-		} catch (e) {
-			// Ignore file not existing errors for _routes.json but forward the potential
-			// FatalError from an invalid spec
-			if (e instanceof FatalError) {
-				throw e;
+				logger.warn(
+					`_routes.json is an experimental feature and is subject to change. Please use with care.`
+				);
+			} catch (err) {
+				// forward the potential FatalError from an invalid spec
+				if (err instanceof FatalError) {
+					throw err;
+				}
 			}
 		}
 	}
@@ -389,3 +420,29 @@ export const Handler = async ({
 	);
 	await metrics.sendMetricsEvent("create pages deployment");
 };
+
+/**
+ * Custom _routes.json files need to run through optimization
+ * to potentially reduce the overall worker pipeline size
+ */
+function validateAndOptimizeRoutesFile(
+	_routes: string,
+	routesPath: string
+): string {
+	const routes = JSON.parse(_routes);
+
+	if (!isRoutesJSONSpec(routes)) {
+		throw new FatalError(
+			`Invalid _routes.json file found at: ${routesPath}. Please make sure the JSON object has the following format:
+      {
+        version: ${ROUTES_SPEC_VERSION};
+        include: string[];
+        exclude: string[];
+      }
+      `,
+			1
+		);
+	}
+
+	return JSON.stringify(optimizeRoutesJSONSpec(routes));
+}

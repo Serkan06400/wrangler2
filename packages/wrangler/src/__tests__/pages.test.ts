@@ -12,6 +12,7 @@ import { runInTempDir } from "./helpers/run-in-tmp";
 import { runWrangler } from "./helpers/run-wrangler";
 import type { Deployment, Project, UploadPayloadFile } from "../pages/types";
 import type { FormData, RequestInit } from "undici";
+import { ROUTES_SPEC_VERSION } from "../pages/constants";
 
 // Asserting within mock responses get swallowed, so run them out-of-band
 const outOfBandTests: (() => void)[] = [];
@@ -32,7 +33,7 @@ function mockGetToken(jwt: string) {
 	);
 }
 
-describe("pages", () => {
+describe.only("pages", () => {
 	runInTempDir();
 	const std = mockConsoleMethods();
 	function endEventLoop() {
@@ -398,13 +399,11 @@ describe("pages", () => {
 
 			await runWrangler("pages publish . --project-name=foo");
 
-			// TODO: Unmounting somehow loses this output
+			expect(std.out).toMatchInlineSnapshot(`
+			  "✨ Success! Uploaded 1 files (TIMINGS)
 
-			// expect(std.out).toMatchInlineSnapshot(`
-			//   "✨ Success! Uploaded 1 files (TIMINGS)
-
-			//   ✨ Deployment complete! Take a peek over at https://abcxyz.foo.pages.dev/"
-			// `);
+			  ✨ Deployment complete! Take a peek over at https://abcxyz.foo.pages.dev/"
+			`);
 		});
 
 		it("should retry uploads", async () => {
@@ -1001,6 +1000,88 @@ describe("pages", () => {
 			).rejects.toThrowErrorMatchingInlineSnapshot(
 				`"Pages does not support wrangler.toml"`
 			);
+		});
+
+		describe("Pages Functions project", () => {
+			beforeEach(() => {
+				mkdirSync("functions");
+				writeFileSync("functions/hello.ts", `export const onRequest = () => {
+					return new Response("Hello world!");
+				};`);
+				writeFileSync("README.md", "foobar");
+			});
+
+			it("should upload the _routes.json file if found", async () => {
+				writeFileSync("_routes.json", `{
+					"version": ${ROUTES_SPEC_VERSION},
+					"include": [],
+					"exclude": []
+				}`);
+
+				mockGetToken("<<funfetti-auth-jwt>>");
+
+				setMockResponse(
+					"/pages/assets/check-missing",
+					"POST",
+					async (_, init) => {
+						const body = JSON.parse(init.body as string) as { hashes: string[] };
+
+						assertLater(() => {
+							expect(init.headers).toMatchObject({
+								Authorization: "Bearer <<funfetti-auth-jwt>>",
+							});
+							expect(body).toMatchObject({
+								hashes: expect.arrayContaining([
+									"95d25bc9bf437b6a8d4fa39359907f03",
+    							"03a7c376be220cfe08a866ea337e12ad",
+								]),
+							});
+						});
+
+						return body.hashes;
+					}
+				);
+
+				// Accumulate multiple requests then assert afterwards
+				const requests: RequestInit[] = [];
+				setMockResponse("/pages/assets/upload", "POST", async (_, init) => {
+					requests.push(init);
+				});
+
+				setMockResponse(
+					"/accounts/:accountId/pages/projects/foo/deployments",
+					async ([_url, accountId], init) => {
+						assertLater(() => {
+							expect(accountId).toEqual("some-account-id");
+							expect(init.method).toEqual("POST");
+							const body = init.body as FormData;
+							const manifest = JSON.parse(body.get("manifest") as string);
+							expect(manifest).toMatchInlineSnapshot(`
+													Object {
+														"/README.md": "95d25bc9bf437b6a8d4fa39359907f03",
+														"/functions/date.ts": "03a7c376be220cfe08a866ea337e12ad",
+													}
+											`);
+						});
+
+						return {
+							url: "https://abcxyz.foo.pages.dev/",
+						};
+					}
+				);
+
+				await runWrangler("pages publish . --project-name=foo");
+
+				expect(std.out).toMatchInlineSnapshot(`
+					"✨ Success! Uploaded 2 files (TIMINGS)
+
+					✨ Uploading Functions
+					✨ Uploading _routes.json
+					▲ [WARNING] _routes.json is an experimental feature and is subject to change. Please use with care.
+
+					✨ Deployment complete! Take a peek over at https://abcxyz.foo.pages.dev/"
+				`);
+			});
 		});
 	});
 
