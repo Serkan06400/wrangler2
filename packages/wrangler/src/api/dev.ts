@@ -93,7 +93,7 @@ export async function unstable_dev(
 				resolve({
 					stop: devServer.stop,
 					fetch: devServer.fetch,
-					//
+					//no-op, does nothing in tests
 					waitUntilExit: async () => {
 						return;
 					},

@@ -334,11 +334,16 @@ export async function startDev(args: StartDevOptions) {
 			});
 		}
 
-		const entry = await getEntry(
-			{ assets: args.assets, script: args.script },
-			config,
-			"dev"
-		);
+		const {
+			entry,
+			nodeCompat,
+			upstreamProtocol,
+			zoneId,
+			host,
+			routes,
+			getLocalPort,
+			getInspectorPort,
+		} = await commonDev(args, config);
 
 		await metrics.sendMetricsEvent(
 			"run dev",
@@ -348,113 +353,6 @@ export async function startDev(args: StartDevOptions) {
 			},
 			{ sendMetrics: config.send_metrics, offline: args.local }
 		);
-
-		if (config.services && config.services.length > 0) {
-			logger.warn(
-				`This worker is bound to live services: ${config.services
-					.map(
-						(service) =>
-							`${service.binding} (${service.service}${
-								service.environment ? `@${service.environment}` : ""
-							})`
-					)
-					.join(", ")}`
-			);
-		}
-
-		if (args.inspect) {
-			//devtools are enabled by default, but we still need to disable them if the caller doesn't want them
-			logger.warn(
-				"Passing --inspect is unnecessary, now you can always connect to devtools."
-			);
-		}
-
-		if (args["experimental-public"]) {
-			throw new Error(
-				"The --experimental-public field has been renamed to --assets"
-			);
-		}
-
-		if (args.public) {
-			throw new Error("The --public field has been renamed to --assets");
-		}
-
-		if ((args.assets || config.assets) && (args.site || config.site)) {
-			throw new Error(
-				"Cannot use Assets and Workers Sites in the same Worker."
-			);
-		}
-
-		if (args.assets) {
-			logger.warn(
-				"The --assets argument is experimental and may change or break at any time"
-			);
-		}
-
-		const upstreamProtocol =
-			args["upstream-protocol"] || config.dev.upstream_protocol;
-		if (upstreamProtocol === "http") {
-			logger.warn(
-				"Setting upstream-protocol to http is not currently implemented.\n" +
-					"If this is required in your project, please add your use case to the following issue:\n" +
-					"https://github.com/cloudflare/wrangler2/issues/583."
-			);
-		}
-
-		// TODO: if worker_dev = false and no routes, then error (only for dev)
-
-		// Compute zone info from the `host` and `route` args and config;
-		let host = args.host || config.dev.host;
-		let zoneId: string | undefined;
-		const routes: Route[] | undefined =
-			args.routes || (config.route && [config.route]) || config.routes;
-
-		if (args.forceLocal) {
-			args.local = true;
-		}
-
-		if (!args.local) {
-			if (host) {
-				zoneId = await getZoneIdFromHost(host);
-			}
-			if (!zoneId && routes) {
-				const firstRoute = routes[0];
-				const zone = await getZoneForRoute(firstRoute);
-				if (zone) {
-					zoneId = zone.id;
-					host = zone.host;
-				}
-			}
-		} else if (!host) {
-			if (routes) {
-				const firstRoute = routes[0];
-				host = getHostFromRoute(firstRoute);
-			}
-		}
-
-		const nodeCompat = args.nodeCompat ?? config.node_compat;
-		if (nodeCompat) {
-			logger.warn(
-				"Enabling node.js compatibility mode for built-ins and globals. This is experimental and has serious tradeoffs. Please see https://github.com/ionic-team/rollup-plugin-node-polyfills/ for more details."
-			);
-		}
-
-		const getLocalPort = memoizeGetPort(DEFAULT_LOCAL_PORT);
-		const getInspectorPort = memoizeGetPort(DEFAULT_INSPECTOR_PORT);
-
-		const cliVars =
-			args.var?.reduce<Record<string, string>>((collectVars, v) => {
-				const [key, ...value] = v.split(":");
-				collectVars[key] = value.join("");
-				return collectVars;
-			}, {}) || {};
-
-		const cliDefines =
-			args.define?.reduce<Record<string, string>>((collectDefines, d) => {
-				const [key, ...value] = d.split(":");
-				collectDefines[key] = value.join("");
-				return collectDefines;
-			}, {}) || {};
 
 		// eslint-disable-next-line no-inner-declarations
 		async function getDevReactElement(configParam: Config) {
@@ -532,7 +430,6 @@ export async function startDev(args: StartDevOptions) {
 				await watcher?.close();
 			},
 			fetch: async (init?: RequestInit) => {
-				//TODO: we are not guaranteed to be assigned this port, we should fix this ASAP
 				const port = args.port || config.dev.port || (await getLocalPort());
 				const address = args.ip || config.dev.ip || "localhost";
 
@@ -545,223 +442,110 @@ export async function startDev(args: StartDevOptions) {
 }
 
 export async function startApiDev(args: StartDevOptions) {
-	let watcher: ReturnType<typeof watch> | undefined;
-
-	try {
-		if (args.logLevel) {
-			// we don't define a "none" logLevel, so "error" will do for now.
-			logger.loggerLevel = args.logLevel === "none" ? "error" : args.logLevel;
-		}
-		await printWranglerBanner();
-
-		const configPath =
-			(args.config as ConfigPath) ||
-			((args.script &&
-				findWranglerToml(path.dirname(args.script))) as ConfigPath);
-		let config = readConfig(configPath, args);
-		await metrics.sendMetricsEvent(
-			"run dev",
-			{ local: args.local },
-			{ sendMetrics: config.send_metrics, offline: args.local }
-		);
-
-		if (config.configPath) {
-			watcher = watch(config.configPath, {
-				persistent: true,
-			}).on("change", async (_event) => {
-				// TODO: Do we need to handle different `_event` types differently?
-				//       e.g. what if the file is deleted, or added?
-				config = readConfig(configPath, args);
-				if (config.configPath) {
-					logger.log(`${path.basename(config.configPath)} changed...`);
-					//TODO: @rozenmd: re-run generateBundle etc here
-					// rerender(await getDevReactElement(config));
-				}
-			});
-		}
-
-		const entry = await getEntry(
-			{ assets: args.assets, script: args.script },
-			config,
-			"dev"
-		);
-
-		if (config.services && config.services.length > 0) {
-			logger.warn(
-				`This worker is bound to live services: ${config.services
-					.map(
-						(service) =>
-							`${service.binding} (${service.service}${
-								service.environment ? `@${service.environment}` : ""
-							})`
-					)
-					.join(", ")}`
-			);
-		}
-
-		if (args.inspect) {
-			//devtools are enabled by default, but we still need to disable them if the caller doesn't want them
-			logger.warn(
-				"Passing --inspect is unnecessary, now you can always connect to devtools."
-			);
-		}
-
-		if (args["experimental-public"]) {
-			throw new Error(
-				"The --experimental-public field has been renamed to --assets"
-			);
-		}
-
-		if (args.public) {
-			throw new Error("The --public field has been renamed to --assets");
-		}
-
-		if ((args.assets || config.assets) && (args.site || config.site)) {
-			throw new Error(
-				"Cannot use Assets and Workers Sites in the same Worker."
-			);
-		}
-
-		if (args.assets) {
-			logger.warn(
-				"The --assets argument is experimental and may change or break at any time"
-			);
-		}
-
-		const upstreamProtocol =
-			args["upstream-protocol"] || config.dev.upstream_protocol;
-		if (upstreamProtocol === "http") {
-			logger.warn(
-				"Setting upstream-protocol to http is not currently implemented.\n" +
-					"If this is required in your project, please add your use case to the following issue:\n" +
-					"https://github.com/cloudflare/wrangler2/issues/583."
-			);
-		}
-
-		// TODO: if worker_dev = false and no routes, then error (only for dev)
-
-		// Compute zone info from the `host` and `route` args and config;
-		let host = args.host || config.dev.host;
-		let zoneId: string | undefined;
-		const routes: Route[] | undefined =
-			args.routes || (config.route && [config.route]) || config.routes;
-
-		if (args.forceLocal) {
-			args.local = true;
-		}
-
-		if (!args.local) {
-			if (host) {
-				zoneId = await getZoneIdFromHost(host);
-			}
-			if (!zoneId && routes) {
-				const firstRoute = routes[0];
-				const zone = await getZoneForRoute(firstRoute);
-				if (zone) {
-					zoneId = zone.id;
-					host = zone.host;
-				}
-			}
-		} else if (!host) {
-			if (routes) {
-				const firstRoute = routes[0];
-				host = getHostFromRoute(firstRoute);
-			}
-		}
-
-		const nodeCompat = args.nodeCompat ?? config.node_compat;
-		if (nodeCompat) {
-			logger.warn(
-				"Enabling node.js compatibility mode for built-ins and globals. This is experimental and has serious tradeoffs. Please see https://github.com/ionic-team/rollup-plugin-node-polyfills/ for more details."
-			);
-		}
-
-		const getLocalPort = memoizeGetPort(DEFAULT_LOCAL_PORT);
-		const getInspectorPort = memoizeGetPort(DEFAULT_INSPECTOR_PORT);
-
-		// eslint-disable-next-line no-inner-declarations
-		async function runReactlessImplementation(configParam: Config) {
-			const { assetPaths, bindings } = await getBindingsAndAssetPaths(
-				args,
-				configParam
-			);
-
-			return await implementation({
-				name: getScriptName({ name: args.name, env: args.env }, configParam),
-				noBundle: !(args.bundle ?? !configParam.no_bundle),
-				entry: entry,
-				env: args.env,
-				zone: zoneId,
-				host: host,
-				routes: routes,
-				rules: getRules(configParam),
-				legacyEnv: isLegacyEnv(configParam),
-				minify: args.minify ?? configParam.minify,
-				nodeCompat: nodeCompat,
-				build: configParam.build || {},
-				define: configParam.define,
-				initialMode: args.local ? "local" : "remote",
-				jsxFactory: args["jsx-factory"] || configParam.jsx_factory,
-				jsxFragment: args["jsx-fragment"] || configParam.jsx_fragment,
-				tsconfig: args.tsconfig ?? configParam.tsconfig,
-				upstreamProtocol: upstreamProtocol,
-				localProtocol: args.localProtocol || configParam.dev.local_protocol,
-				localUpstream: args["local-upstream"] || host,
-				enableLocalPersistence:
-					args.experimentalEnableLocalPersistence || false,
-				liveReload: args.liveReload || false,
-				accountId: configParam.account_id || getAccountFromCache()?.id,
-				assetPaths: assetPaths,
-				assetsConfig: configParam.assets,
-				port: args.port || configParam.dev.port || (await getLocalPort()),
-				ip: args.ip || configParam.dev.ip,
-				inspectorPort:
-					args["inspector-port"] ||
-					configParam.dev.inspector_port ||
-					(await getInspectorPort()),
-				isWorkersSite: Boolean(args.site || configParam.site),
-				compatibilityDate: getDevCompatibilityDate(
-					config,
-					args["compatibility-date"]
-				),
-				compatibilityFlags:
-					args["compatibility-flags"] || configParam.compatibility_flags,
-				usageModel: configParam.usage_model,
-				bindings: bindings,
-				crons: configParam.triggers.crons,
-				logLevel: args.logLevel,
-				logPrefix: args.logPrefix,
-				onReady: args.onReady,
-				inspect: args.inspect ?? true,
-				showInteractiveDevSession: args.showInteractiveDevSession,
-				forceLocal: args.forceLocal,
-				enablePagesAssetsServiceBinding: args.enablePagesAssetsServiceBinding,
-				local: true,
-				firstPartyWorker: undefined,
-				sendMetrics: undefined,
-			});
-		}
-
-		const { stop } = await runReactlessImplementation(config);
-		//TODO: @rozenmd: provide a way to re-run generateBundle etc here
-
-		return {
-			watcher,
-			stop: async () => {
-				await stop();
-				await watcher?.close();
-			},
-			fetch: async (init?: RequestInit) => {
-				//TODO: we are not guaranteed to be assigned this port, we should fix this ASAP
-				const port = args.port || config.dev.port || (await getLocalPort());
-				const address = args.ip || config.dev.ip || "localhost";
-
-				return await fetch(`http://${address}:${port}/`, init);
-			},
-		};
-	} finally {
-		await watcher?.close();
+	if (args.logLevel) {
+		// we don't define a "none" logLevel, so "error" will do for now.
+		logger.loggerLevel = args.logLevel === "none" ? "error" : args.logLevel;
 	}
+	await printWranglerBanner();
+
+	const configPath =
+		(args.config as ConfigPath) ||
+		((args.script &&
+			findWranglerToml(path.dirname(args.script))) as ConfigPath);
+	const config = readConfig(configPath, args);
+
+	const {
+		entry,
+		nodeCompat,
+		upstreamProtocol,
+		zoneId,
+		host,
+		routes,
+		getLocalPort,
+		getInspectorPort,
+	} = await commonDev(args, config);
+
+	await metrics.sendMetricsEvent(
+		"run dev (api)",
+		{ local: args.local },
+		{ sendMetrics: config.send_metrics, offline: args.local }
+	);
+
+	// eslint-disable-next-line no-inner-declarations
+	async function runReactlessImplementation(configParam: Config) {
+		const { assetPaths, bindings } = await getBindingsAndAssetPaths(
+			args,
+			configParam
+		);
+
+		return await implementation({
+			name: getScriptName({ name: args.name, env: args.env }, configParam),
+			noBundle: !(args.bundle ?? !configParam.no_bundle),
+			entry: entry,
+			env: args.env,
+			zone: zoneId,
+			host: host,
+			routes: routes,
+			rules: getRules(configParam),
+			legacyEnv: isLegacyEnv(configParam),
+			minify: args.minify ?? configParam.minify,
+			nodeCompat: nodeCompat,
+			build: configParam.build || {},
+			define: configParam.define,
+			initialMode: args.local ? "local" : "remote",
+			jsxFactory: args["jsx-factory"] || configParam.jsx_factory,
+			jsxFragment: args["jsx-fragment"] || configParam.jsx_fragment,
+			tsconfig: args.tsconfig ?? configParam.tsconfig,
+			upstreamProtocol: upstreamProtocol,
+			localProtocol: args.localProtocol || configParam.dev.local_protocol,
+			localUpstream: args["local-upstream"] || host,
+			enableLocalPersistence: args.experimentalEnableLocalPersistence || false,
+			liveReload: args.liveReload || false,
+			accountId: configParam.account_id || getAccountFromCache()?.id,
+			assetPaths: assetPaths,
+			assetsConfig: configParam.assets,
+			port: args.port || configParam.dev.port || (await getLocalPort()),
+			ip: args.ip || configParam.dev.ip,
+			inspectorPort:
+				args["inspector-port"] ||
+				configParam.dev.inspector_port ||
+				(await getInspectorPort()),
+			isWorkersSite: Boolean(args.site || configParam.site),
+			compatibilityDate: getDevCompatibilityDate(
+				config,
+				args["compatibility-date"]
+			),
+			compatibilityFlags:
+				args["compatibility-flags"] || configParam.compatibility_flags,
+			usageModel: configParam.usage_model,
+			bindings: bindings,
+			crons: configParam.triggers.crons,
+			logLevel: args.logLevel,
+			logPrefix: args.logPrefix,
+			onReady: args.onReady,
+			inspect: args.inspect ?? true,
+			showInteractiveDevSession: args.showInteractiveDevSession,
+			forceLocal: args.forceLocal,
+			enablePagesAssetsServiceBinding: args.enablePagesAssetsServiceBinding,
+			local: true,
+			firstPartyWorker: undefined,
+			sendMetrics: undefined,
+		});
+	}
+
+	const { stop } = await runReactlessImplementation(config);
+
+	return {
+		stop: async () => {
+			await stop();
+		},
+		fetch: async (init?: RequestInit) => {
+			const port = args.port || config.dev.port || (await getLocalPort());
+			const address = args.ip || config.dev.ip || "localhost";
+
+			return await fetch(`http://${address}:${port}/`, init);
+		},
+	};
 }
 /**
  * Avoiding calling `getPort()` multiple times by memoizing the first result.
@@ -787,6 +571,119 @@ function maskVars(bindings: CfWorkerInit["bindings"], configParam: Config) {
 		}
 	}
 	return maskedVars;
+}
+
+async function getZoneIdHostAndRoutes(args: StartDevOptions, config: Config) {
+	// TODO: if worker_dev = false and no routes, then error (only for dev)
+	// Compute zone info from the `host` and `route` args and config;
+	let host = args.host || config.dev.host;
+	let zoneId: string | undefined;
+	const routes: Route[] | undefined =
+		args.routes || (config.route && [config.route]) || config.routes;
+
+	if (args.forceLocal) {
+		args.local = true;
+	}
+
+	if (!args.local) {
+		if (host) {
+			zoneId = await getZoneIdFromHost(host);
+		}
+		if (!zoneId && routes) {
+			const firstRoute = routes[0];
+			const zone = await getZoneForRoute(firstRoute);
+			if (zone) {
+				zoneId = zone.id;
+				host = zone.host;
+			}
+		}
+	} else if (!host) {
+		if (routes) {
+			const firstRoute = routes[0];
+			host = getHostFromRoute(firstRoute);
+		}
+	}
+	return { host, routes, zoneId };
+}
+
+async function commonDev(args: StartDevOptions, config: Config) {
+	const entry = await getEntry(
+		{ assets: args.assets, script: args.script },
+		config,
+		"dev"
+	);
+
+	const { zoneId, host, routes } = await getZoneIdHostAndRoutes(args, config);
+	const getLocalPort = memoizeGetPort(DEFAULT_LOCAL_PORT);
+	const getInspectorPort = memoizeGetPort(DEFAULT_INSPECTOR_PORT);
+
+	if (config.services && config.services.length > 0) {
+		logger.warn(
+			`This worker is bound to live services: ${config.services
+				.map(
+					(service) =>
+						`${service.binding} (${service.service}${
+							service.environment ? `@${service.environment}` : ""
+						})`
+				)
+				.join(", ")}`
+		);
+	}
+
+	if (args.inspect) {
+		//devtools are enabled by default, but we still need to disable them if the caller doesn't want them
+		logger.warn(
+			"Passing --inspect is unnecessary, now you can always connect to devtools."
+		);
+	}
+
+	if (args["experimental-public"]) {
+		throw new Error(
+			"The --experimental-public field has been renamed to --assets"
+		);
+	}
+
+	if (args.public) {
+		throw new Error("The --public field has been renamed to --assets");
+	}
+
+	if ((args.assets || config.assets) && (args.site || config.site)) {
+		throw new Error("Cannot use Assets and Workers Sites in the same Worker.");
+	}
+
+	if (args.assets) {
+		logger.warn(
+			"The --assets argument is experimental and may change or break at any time"
+		);
+	}
+
+	const upstreamProtocol =
+		args["upstream-protocol"] || config.dev.upstream_protocol;
+	if (upstreamProtocol === "http") {
+		logger.warn(
+			"Setting upstream-protocol to http is not currently implemented.\n" +
+				"If this is required in your project, please add your use case to the following issue:\n" +
+				"https://github.com/cloudflare/wrangler2/issues/583."
+		);
+	}
+
+	const nodeCompat = args.nodeCompat ?? config.node_compat;
+	if (nodeCompat) {
+		logger.warn(
+			"Enabling node.js compatibility mode for built-ins and globals. This is experimental and has serious tradeoffs. Please see https://github.com/ionic-team/rollup-plugin-node-polyfills/ for more details."
+		);
+	}
+
+	return {
+		entry,
+		upstreamProtocol,
+		nodeCompat,
+		getLocalPort,
+		getInspectorPort,
+		zoneId,
+		host,
+		routes,
+	};
 }
 
 async function getBindingsAndAssetPaths(

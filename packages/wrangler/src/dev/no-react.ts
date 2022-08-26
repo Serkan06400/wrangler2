@@ -1,9 +1,7 @@
-import assert from "node:assert";
 import { fork } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import * as path from "node:path";
-import { watch } from "chokidar";
 import onExit from "signal-exit";
 import tmp from "tmp-promise";
 import { bundleWorker } from "../bundle";
@@ -19,7 +17,6 @@ import type { DevProps, DirectorySyncResult } from "./dev";
 import type { LocalProps } from "./local";
 import type { EsbuildBundle } from "./use-esbuild";
 
-import type { WatchMode } from "esbuild";
 import type { MiniflareOptions } from "miniflare";
 import type { ChildProcess } from "node:child_process";
 
@@ -30,7 +27,7 @@ export async function implementation(
 ) {
 	validateDevProps(props);
 	// implement a react-free version of useCustomBuild
-	const watcher = setupCustomBuild(props.entry, props.build);
+	setupAndRunCustomBuild(props.entry, props.build);
 
 	//implement a react-free version of useTmpDir
 	const directory = setupTempDir();
@@ -86,34 +83,19 @@ export async function implementation(
 
 	return {
 		stop: async () => {
-			await watcher?.close();
 			stop();
 		},
 		inspectorUrl,
 	};
 }
 
-function setupCustomBuild(
-	expectedEntry: Entry,
-	build: Config["build"]
-): ReturnType<typeof watch> | undefined {
+function setupAndRunCustomBuild(expectedEntry: Entry, build: Config["build"]) {
 	if (!build.command) return;
-	let watcher: ReturnType<typeof watch> | undefined;
-	if (build.watch_dir) {
-		watcher = watch(build.watch_dir, {
-			persistent: true,
-			ignoreInitial: true,
-		}).on("all", (_event, filePath) => {
-			const relativeFile =
-				path.relative(expectedEntry.directory, expectedEntry.file) || ".";
-			//TODO: we should buffer requests to the proxy until this completes
-			logger.log(`The file ${filePath} changed, restarting build...`);
-			runCustomBuild(expectedEntry.file, relativeFile, build).catch((err) => {
-				logger.error("Custom build failed:", err);
-			});
-		});
-		return watcher;
-	}
+	const relativeFile =
+		path.relative(expectedEntry.directory, expectedEntry.file) || ".";
+	runCustomBuild(expectedEntry.file, relativeFile, build).catch((err) => {
+		logger.error("Custom build failed:", err);
+	});
 }
 
 function setupTempDir(): DirectorySyncResult | undefined {
@@ -155,31 +137,10 @@ async function runEsbuild({
 	nodeCompat: boolean | undefined;
 	noBundle: boolean;
 }): Promise<EsbuildBundle | undefined> {
-	let stopWatching: (() => void) | undefined = undefined;
 	let bundle: EsbuildBundle | undefined;
 	function setBundle(b: EsbuildBundle) {
 		bundle = b;
 	}
-
-	function updateBundle() {
-		// nothing really changes here, so let's increment the id
-		// to change the return object's identity
-		const previousBundle = bundle;
-		assert(
-			previousBundle,
-			"Rebuild triggered with no previous build available"
-		);
-		setBundle({ ...previousBundle, id: previousBundle.id + 1 });
-	}
-
-	const watchMode: WatchMode = {
-		async onRebuild(error) {
-			if (error) logger.error("Watch build failed:", error);
-			else {
-				updateBundle();
-			}
-		},
-	};
 
 	async function build() {
 		if (!destination) return;
@@ -188,7 +149,6 @@ async function runEsbuild({
 			resolvedEntryPointPath,
 			bundleType,
 			modules,
-			stop,
 			sourceMapPath,
 		}: Awaited<ReturnType<typeof bundleWorker>> = noBundle
 			? {
@@ -203,7 +163,6 @@ async function runEsbuild({
 					jsxFactory,
 					jsxFragment,
 					rules,
-					watch: watchMode,
 					tsconfig,
 					minify,
 					nodeCompat,
@@ -219,23 +178,6 @@ async function runEsbuild({
 					firstPartyWorkerDevFacade: undefined,
 			  });
 
-		// Capture the `stop()` method to use as the `useEffect()` destructor.
-		stopWatching = stop;
-
-		// if "noBundle" is true, then we need to manually watch the entry point and
-		// trigger "builds" when it changes
-		if (noBundle) {
-			const watcher = watch(entry.file, {
-				persistent: true,
-			}).on("change", async (_event) => {
-				updateBundle();
-			});
-
-			stopWatching = () => {
-				watcher.close();
-			};
-		}
-
 		setBundle({
 			id: 0,
 			entry,
@@ -250,7 +192,6 @@ async function runEsbuild({
 		// If esbuild fails on first run, we want to quit the process
 		// since we can't recover from here
 		// related: https://github.com/evanw/esbuild/issues/1037
-		stopWatching?.();
 		throw new Error(err);
 	});
 	return bundle;
