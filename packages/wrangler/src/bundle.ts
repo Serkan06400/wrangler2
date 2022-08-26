@@ -397,10 +397,7 @@ async function applyMiddlewareLoaderFacade(
 					...middleware.reduce(
 						(obj, val, index) => ({
 							...obj,
-							[`__MIDDLEWARE_${middlewareIdentifiers[index]}__`]: path.resolve(
-								__dirname,
-								val
-							),
+							[middlewareIdentifiers[index]]: path.resolve(__dirname, val),
 						}),
 						{}
 					),
