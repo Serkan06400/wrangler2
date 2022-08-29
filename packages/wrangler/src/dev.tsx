@@ -343,6 +343,7 @@ export async function startDev(args: StartDevOptions) {
 			routes,
 			getLocalPort,
 			getInspectorPort,
+			cliDefines,
 		} = await commonDev(args, config);
 
 		await metrics.sendMetricsEvent(
@@ -375,7 +376,7 @@ export async function startDev(args: StartDevOptions) {
 					minify={args.minify ?? configParam.minify}
 					nodeCompat={nodeCompat}
 					build={configParam.build || {}}
-					define={configParam.define}
+					define={{ ...configParam.define, ...cliDefines }}
 					initialMode={args.local ? "local" : "remote"}
 					jsxFactory={args["jsx-factory"] || configParam.jsx_factory}
 					jsxFragment={args["jsx-fragment"] || configParam.jsx_fragment}
@@ -463,6 +464,7 @@ export async function startApiDev(args: StartDevOptions) {
 		routes,
 		getLocalPort,
 		getInspectorPort,
+		cliDefines,
 	} = await commonDev(args, config);
 
 	await metrics.sendMetricsEvent(
@@ -491,7 +493,7 @@ export async function startApiDev(args: StartDevOptions) {
 			minify: args.minify ?? configParam.minify,
 			nodeCompat: nodeCompat,
 			build: configParam.build || {},
-			define: configParam.define,
+			define: { ...config.define, ...cliDefines },
 			initialMode: args.local ? "local" : "remote",
 			jsxFactory: args["jsx-factory"] || configParam.jsx_factory,
 			jsxFragment: args["jsx-fragment"] || configParam.jsx_fragment,
@@ -674,6 +676,13 @@ async function commonDev(args: StartDevOptions, config: Config) {
 		);
 	}
 
+	const cliDefines =
+		args.define?.reduce<Record<string, string>>((collectDefines, d) => {
+			const [key, ...value] = d.split(":");
+			collectDefines[key] = value.join("");
+			return collectDefines;
+		}, {}) || {};
+
 	return {
 		entry,
 		upstreamProtocol,
@@ -683,6 +692,7 @@ async function commonDev(args: StartDevOptions, config: Config) {
 		zoneId,
 		host,
 		routes,
+		cliDefines,
 	};
 }
 
@@ -690,10 +700,17 @@ async function getBindingsAndAssetPaths(
 	args: StartDevOptions,
 	configParam: Config
 ) {
+	const cliVars =
+		args.var?.reduce<Record<string, string>>((collectVars, v) => {
+			const [key, ...value] = v.split(":");
+			collectVars[key] = value.join("");
+			return collectVars;
+		}, {}) || {};
+
 	// now log all available bindings into the terminal
 	const bindings = await getBindings(configParam, {
 		kv: args.kv,
-		vars: args.vars,
+		vars: { ...args.vars, ...cliVars },
 		durableObjects: args.durableObjects,
 		r2: args.r2,
 	});
